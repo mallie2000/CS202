@@ -124,6 +124,7 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
+  p->system_call_count = 0;
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -680,4 +681,59 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+int
+return_sys_info(int n)
+{
+//f param == 0: the total number of active processes (ready, running, waiting, or zombie) in the 
+//system
+  if(n == 0)
+  {
+    int number_of_processes = 0;
+    struct proc *p;
+
+    for(p = proc; p < &proc[NPROC]; p++) 
+    {
+      acquire(&p->lock);
+      if((p->state != UNUSED) && (p->state != USED))
+      {
+        number_of_processes++;
+      } 
+      release(&p->lock);
+    }
+    return number_of_processes;
+  }
+  else if(n == 1)
+  {
+    extern int SYSTEM_CALL_COUNT;
+    return SYSTEM_CALL_COUNT;
+  }
+  else if (n == 2){return return_free_memory_pages();}
+  else {return -1;}
+}
+
+int setpinfo(struct pinfo *p)
+{
+  struct proc *process = myproc();
+  struct pinfo k;
+
+  //Get pid from the parent
+  acquire(&wait_lock);
+  k.ppid = process->parent->pid;
+  release(&wait_lock);
+
+  //Get number of system calls the process made
+  k.syscall_count = (process->system_call_count)-1;
+
+  //Get page usage
+  k.page_usage = (process->sz)/4096;
+  int remainder = (process->sz)%4096;
+  if(remainder > 0){k.page_usage = k.page_usage+1;}
+
+  if(copyout(process->pagetable, (uint64)p, &k,sizeof(k)) < 0)
+  {
+    return -1;
+  }
+  return 0;
 }

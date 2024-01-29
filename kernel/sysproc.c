@@ -89,3 +89,19 @@ sys_uptime(void)
   release(&tickslock);
   return xticks;
 }
+
+uint64
+sys_sysinfo(void)
+{
+  int n;
+  argint(0,&n);
+  return return_sys_info(n);
+}
+
+uint64
+sys_procinfo(void)
+{
+  struct pinfo *p;
+  argaddr(0, (void *)&p);
+  return setpinfo(p);
+}

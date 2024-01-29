@@ -22,6 +22,8 @@ int getpid(void);
 char* sbrk(int);
 int sleep(int);
 int uptime(void);
+int sysinfo(int);
+int procinfo(struct pinfo *);
 
 // ulib.c
 int stat(const char*, struct stat*);
