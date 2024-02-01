@@ -707,7 +707,7 @@ return_sys_info(int n)
   else if(n == 1)
   {
     extern int SYSTEM_CALL_COUNT;
-    return SYSTEM_CALL_COUNT;
+    return SYSTEM_CALL_COUNT -1;
   }
   else if (n == 2){return return_free_memory_pages();}
   else {return -1;}
