@@ -105,3 +105,17 @@ sys_procinfo(void)
   argaddr(0, (void *)&p);
   return setpinfo(p);
 }
+
+uint64
+sys_sched_statistics(void)
+{
+  return sched_statistics();
+}
+
+uint64
+sys_sched_tickets(void) 
+{
+  int n; 
+  argint(0, &n);
+  return sched_tickets(n);
+}

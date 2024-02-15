@@ -92,6 +92,12 @@ struct proc {
   int xstate;                  // Exit status to be returned to parent's wait
   int pid;                     // Process ID
   int system_call_count;       // Number of system calls made
+  int tickets; 
+  int ticks; 
+
+  // for stride scheduling only (k value is a global constant in proc.c)
+  int stride;
+  int pass;
 
   // wait_lock must be held when using this:
   struct proc *parent;         // Parent process

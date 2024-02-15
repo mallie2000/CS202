@@ -20,11 +20,24 @@ static void freeproc(struct proc *p);
 
 extern char trampoline[]; // trampoline.S
 
+// stride = K_VALUE / tickets
+static int K_VALUE = 10000; // for stride scheduling
+
 // helps ensure that wakeups of wait()ing
 // parents are not lost. helps obey the
 // memory model when using p->parent.
 // must be acquired before any p->lock.
 struct spinlock wait_lock;
+
+// random number generator used for lottery scheduling (should only be used in this file)
+static unsigned short lfsr = 0xACE1u;
+static unsigned short bit;
+
+static unsigned short 
+rand(void) {
+  bit = ((lfsr >> 0) ^ (lfsr >> 2) ^ (lfsr >> 3) ^ (lfsr >> 5)) & 1;
+  return lfsr = (lfsr >> 1) | (bit << 15);
+}
 
 // Allocate a page for each process's kernel stack.
 // Map it high in memory, followed by an invalid
@@ -125,6 +138,10 @@ found:
   p->pid = allocpid();
   p->state = USED;
   p->system_call_count = 0;
+  p->tickets = 10000; //every process starts with 10000 tickets by default 
+  p->ticks = 0;
+  p->stride = K_VALUE / p->tickets; //default stride is 1
+  p->pass = p->stride;              //initialize a process' pass value to its stride
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -169,6 +186,10 @@ freeproc(struct proc *p)
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+  p->tickets = 0; 
+  p->ticks = 0;
+  p->stride = 0;
+  p->pass = 0;
   p->state = UNUSED;
 }
 
@@ -251,7 +272,9 @@ userinit(void)
   p->cwd = namei("/");
 
   p->state = RUNNABLE;
-
+  p->tickets = 10000;
+  p->stride = K_VALUE / p->tickets;
+  p->pass = p->stride;  
   release(&p->lock);
 }
 
@@ -321,6 +344,7 @@ fork(void)
 
   acquire(&np->lock);
   np->state = RUNNABLE;
+  np->tickets = p->tickets;
   release(&np->lock);
 
   return pid;
@@ -445,10 +469,114 @@ wait(uint64 addr)
 void
 scheduler(void)
 {
+  #if defined(LOTTERY)
+  struct proc *p;
+  struct cpu *c = mycpu();
+
+  int total_tickets;
+  int winning_number;
+  int ticket_sum;
+  
+  c->proc = 0;
+
+  printf("running lottery scheduler\n");
+  for(;;){
+    // Avoid deadlock by ensuring that devices can interrupt.
+    intr_on();
+
+    total_tickets = 0;
+    winning_number = 0;
+    ticket_sum = 0;
+
+    // loop over all ready processes to get the total 
+    // number of tickets available
+    for (p = proc; p < &proc[NPROC]; p++) {
+      if (p->state == RUNNABLE) {
+        total_tickets += p->tickets;
+      }
+    }
+
+    // get the winning lottery number
+    winning_number = rand() % total_tickets;
+
+    // loop over the list of ready processes to find 
+    // the winning process
+    for(p = proc; p < &proc[NPROC]; p++) {
+      acquire(&p->lock);
+      if(p->state == RUNNABLE) {
+        ticket_sum += p->tickets;
+        if (ticket_sum > winning_number) {
+          // Switch to chosen process.  It is the process's job
+          // to release its lock and then reacquire it
+          // before jumping back to us.
+          p->state = RUNNING;
+          p->ticks++;
+          c->proc = p;
+          swtch(&c->context, &p->context);
+
+          // Process is done running for now.
+          // It should have changed its p->state before coming back.
+          c->proc = 0;
+          release(&p->lock);
+          break;
+        }
+      }
+      release(&p->lock);
+    }
+  }
+  #elif defined(STRIDE)
+  struct proc *p;
+  struct cpu *c = mycpu();
+
+  int lowest_pass;
+  struct proc *p_lowest_pass;
+  
+  c->proc = 0;
+  printf("running stride scheduler\n");
+  for(;;){
+    // Avoid deadlock by ensuring that devices can interrupt.
+    intr_on();
+
+    lowest_pass = 2147483647; //INT_MAX (i think)
+
+    // saves the lowest pass process
+    p_lowest_pass = 0;
+
+    // loop over all ready processes to find the process with the lowest pass
+    for (p = proc; p < &proc[NPROC]; p++) {
+      if (p->state == RUNNABLE) {
+        if (p->pass < lowest_pass) {
+          p_lowest_pass = p;
+          lowest_pass = p->pass;
+        }
+      }
+    }
+
+    if (p_lowest_pass != 0) { //if a schedulable process is found... 
+      acquire(&p_lowest_pass->lock);
+      // increment the pass of the lowest pass process by stride
+      p_lowest_pass->pass += p_lowest_pass->stride;
+
+      // Switch to chosen process.  It is the process's job
+      // to release its lock and then reacquire it
+      // before jumping back to us.
+      p_lowest_pass->state = RUNNING;
+      p_lowest_pass->ticks++;
+      c->proc = p_lowest_pass;
+      swtch(&c->context, &p_lowest_pass->context);
+
+      // Process is done running for now.
+      // It should have changed its p->state before coming back.
+      c->proc = 0;
+      release(&p_lowest_pass->lock);
+    }
+  }
+  #else 
   struct proc *p;
   struct cpu *c = mycpu();
   
   c->proc = 0;
+  printf("running RR scheduler\n");
   for(;;){
     // Avoid deadlock by ensuring that devices can interrupt.
     intr_on();
@@ -460,6 +588,7 @@ scheduler(void)
         // to release its lock and then reacquire it
         // before jumping back to us.
         p->state = RUNNING;
+        p->ticks++;
         c->proc = p;
         swtch(&c->context, &p->context);
 
@@ -470,6 +599,7 @@ scheduler(void)
       release(&p->lock);
     }
   }
+  #endif
 }
 
 // Switch to scheduler.  Must hold only p->lock
@@ -735,5 +865,36 @@ int setpinfo(struct pinfo *p)
   {
     return -1;
   }
+  return 0;
+}
+
+int 
+sched_statistics(void) {
+  struct proc *p; 
+
+  for (p = proc; p < &proc[NPROC]; p++) {
+    if (p->state != UNUSED) {
+      printf("%d(%s): tickets: %d, ticks: %d\n", p->pid, p->name, p->tickets, p->ticks);
+    }
+  }
+
+  //just to make the unused function "error" go away 
+  int goawayerror = rand();
+  return (goawayerror - goawayerror);
+}
+
+int 
+sched_tickets(int n) {
+  struct proc *p = myproc();
+
+  if (n <= 0 || n > 10000) { // max ticket value is 10000, cant give a ticket value of 0 or below
+    return 0;
+  }
+
+  acquire(&p->lock);
+  p->tickets = n; 
+  p->stride = K_VALUE / p->tickets;
+  release(&p->lock);
+
   return 0;
 }
