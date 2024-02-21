@@ -894,6 +894,7 @@ sched_tickets(int n) {
   acquire(&p->lock);
   p->tickets = n; 
   p->stride = K_VALUE / p->tickets;
+  p->pass = p->stride;
   release(&p->lock);
 
   return 0;
