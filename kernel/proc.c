@@ -124,6 +124,8 @@ allocproc(void)
 found:
   p->pid = allocpid();
   p->state = USED;
+  p->thread_id = 0;
+  p->thread_count = 0;
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -158,8 +160,10 @@ freeproc(struct proc *p)
   if(p->trapframe)
     kfree((void*)p->trapframe);
   p->trapframe = 0;
-  if(p->pagetable)
+  if(p->pagetable && p->thread_id == 0) // parent process, ok to delete
     proc_freepagetable(p->pagetable, p->sz);
+  else if(p->pagetable && p->thread_id != 0) // child process
+    uvmunmap(p->pagetable, TRAPFRAME - (PGSIZE * p->thread_id), 1, 0);
   p->pagetable = 0;
   p->sz = 0;
   p->pid = 0;
@@ -168,6 +172,8 @@ freeproc(struct proc *p)
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+  p->thread_id = 0;
+  p->thread_count = 0;
   p->state = UNUSED;
 }
 
@@ -250,6 +256,8 @@ userinit(void)
   p->cwd = namei("/");
 
   p->state = RUNNABLE;
+  p->thread_id = 0;
+  p->thread_count = 0;
 
   release(&p->lock);
 }
@@ -680,4 +688,113 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+// Look in the process table for an UNUSED proc.
+// If found, initialize state required to run in the kernel,
+// and return with p->lock held.
+// If there are no free procs, or a memory allocation fails, return 0.
+static struct proc*
+allocproc_thread(struct proc *p)
+{
+  struct proc *new_thread;
+
+  for(new_thread = proc; new_thread < &proc[NPROC]; new_thread++) {
+    acquire(&new_thread->lock);
+    if(new_thread->state == UNUSED) {
+      goto found;
+    } else {
+      release(&new_thread->lock);
+    }
+  }
+  return 0;
+
+found:
+  new_thread->pid = allocpid();
+  new_thread->state = USED;
+  new_thread->thread_id = p->thread_count;
+
+  // Allocate a trapframe page.
+  if((new_thread->trapframe = (struct trapframe *)kalloc()) == 0){
+    freeproc(new_thread);
+    release(&new_thread->lock);
+    return 0;
+  }
+
+  // new thread shares pagetable with parent process
+  new_thread->pagetable = p->pagetable;
+
+  if(new_thread->pagetable == 0){
+    freeproc(new_thread);
+    release(&new_thread->lock);
+    return 0;
+  }
+
+  // Set up new context to start executing at forkret,
+  // which returns to user space.
+  memset(&new_thread->context, 0, sizeof(new_thread->context));
+  new_thread->context.ra = (uint64)forkret;
+  new_thread->context.sp = new_thread->kstack + PGSIZE;
+
+  return new_thread;
+}
+
+int
+clone(void *stack) 
+{
+  int i, pid;
+  struct proc *new_thread;
+  struct proc *p = myproc();
+
+  // parameter null checking, max process thread count is 20
+  if (stack == 0 || p->thread_count == 20) {
+    return -1;
+  }
+
+  // parent process gets a new thread.
+  p->thread_count++;
+
+  // Allocate new thread.
+  if((new_thread = allocproc_thread(p)) == 0){
+    return -1;
+  }
+
+  new_thread->sz = p->sz;
+
+  // map the new thread's trapframe according to its thread_id
+  if(mappages(new_thread->pagetable, TRAPFRAME - (PGSIZE * new_thread->thread_id), PGSIZE, (uint64)(new_thread->trapframe), PTE_R | PTE_W) < 0){
+    uvmunmap(new_thread->pagetable, TRAPFRAME - (PGSIZE * new_thread->thread_id), 1, 0);
+    return -1;
+  }
+
+  // copy saved user registers. 
+  *(new_thread->trapframe) = *(p->trapframe);
+
+  // Cause clone to return 0 in the new thread.
+  new_thread->trapframe->a0 = 0;
+
+  // Set the new threads starting stack address
+  new_thread->trapframe->sp = (uint64)stack;
+
+  // increment reference counts on open file descriptors.
+  for(i = 0; i < NOFILE; i++)
+    if(p->ofile[i])
+      new_thread->ofile[i] = filedup(p->ofile[i]);
+  new_thread->cwd = idup(p->cwd);
+
+  safestrcpy(new_thread->name, p->name, sizeof(p->name));
+
+  pid = new_thread->pid;
+
+  release(&new_thread->lock);
+
+  acquire(&wait_lock);
+  new_thread->parent = p;
+  release(&wait_lock);
+
+  acquire(&new_thread->lock);
+  new_thread->state = RUNNABLE;
+  release(&new_thread->lock);
+
+  return pid;
 }
